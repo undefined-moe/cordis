@@ -1,4 +1,4 @@
-import { defineProperty, Dict } from 'cosmokit'
+import { Awaitable, defineProperty, Dict } from 'cosmokit'
 import { Context } from './context.ts'
 import { ForkScope, MainScope } from './scope.ts'
 import { resolveConfig, symbols } from './utils.ts'
@@ -51,7 +51,7 @@ export namespace Plugin {
   }
 
   export interface Function<C extends Context = Context, T = any> extends Base<T> {
-    (ctx: C, config: T): void
+    (ctx: C, config: T): Awaitable<void>
   }
 
   export interface Constructor<C extends Context = Context, T = any> extends Base<T> {
@@ -59,7 +59,7 @@ export namespace Plugin {
   }
 
   export interface Object<C extends Context = Context, T = any> extends Base<T> {
-    apply: (ctx: C, config: T) => void
+    apply: (ctx: C, config: T) => Awaitable<void>
   }
 }
 
@@ -91,7 +91,7 @@ class Registry<C extends Context = Context> {
     })
 
     this.context = ctx
-    const runtime = new MainScope(ctx, null!, config)
+    const runtime = new MainScope(ctx, null!, config, null, new Error().stack!.split('\n').slice(1))
     ctx.scope = runtime
     runtime.ctx = ctx
     this.set(null!, runtime)
@@ -176,18 +176,20 @@ class Registry<C extends Context = Context> {
       config = null
     }
 
+    const stack = new Error().stack!.split('\n').slice(2)
+
     // check duplication
     let runtime = this.get(plugin)
     if (runtime) {
       if (!runtime.isForkable) {
         this.context.emit(this.ctx, 'internal/warning', new Error(`duplicate plugin detected: ${plugin.name}`))
       }
-      return runtime.fork(this.ctx, config, error)
+      return runtime.fork(this.ctx, config, error, stack)
     }
 
-    runtime = new MainScope(this.ctx, plugin, config, error)
+    runtime = new MainScope(this.ctx, plugin, config, error, stack)
     this.set(plugin, runtime)
-    return runtime.fork(this.ctx, config, error)
+    return runtime.fork(this.ctx, config, error, stack)
   }
 }
 

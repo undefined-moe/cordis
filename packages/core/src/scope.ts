@@ -74,7 +74,7 @@ export abstract class EffectScope<C extends Context = Context> {
   abstract dispose(): boolean
   abstract update(config: C['config'], forced?: boolean): void
 
-  constructor(public parent: C, public config: C['config']) {
+  constructor(public parent: C, public config: C['config'], public stack: string[]) {
     this.uid = parent.registry ? parent.registry.counter : 0
     this.ctx = this.context = parent.extend({ scope: this })
     this.proxy = new Proxy({}, {
@@ -256,8 +256,8 @@ export abstract class EffectScope<C extends Context = Context> {
 export class ForkScope<C extends Context = Context> extends EffectScope<C> {
   dispose: () => boolean
 
-  constructor(parent: Context, public runtime: MainScope<C>, config: C['config'], error?: any) {
-    super(parent as C, config)
+  constructor(parent: Context, public runtime: MainScope<C>, config: C['config'], error: any, stack: string[]) {
+    super(parent as C, config, stack)
 
     this.dispose = defineProperty(parent.scope.collect(`fork <${parent.runtime.name}>`, () => {
       this.uid = null
@@ -300,8 +300,6 @@ export class ForkScope<C extends Context = Context> extends EffectScope<C> {
 }
 
 export class MainScope<C extends Context = Context> extends EffectScope<C> {
-  public value: any
-
   runtime = this
   schema: any
   name?: string
@@ -311,8 +309,8 @@ export class MainScope<C extends Context = Context> extends EffectScope<C> {
   isReusable?: boolean = false
   isReactive?: boolean = false
 
-  constructor(ctx: C, public plugin: Plugin, config: any, error?: any) {
-    super(ctx, config)
+  constructor(ctx: C, public plugin: Plugin, config: any, error: any, stack: string[]) {
+    super(ctx, config, stack)
     if (!plugin) {
       this.name = 'root'
       this.isActive = true
@@ -326,8 +324,8 @@ export class MainScope<C extends Context = Context> extends EffectScope<C> {
     return this.forkables.length > 0
   }
 
-  fork(parent: Context, config: any, error?: any) {
-    return new ForkScope(parent, this, config, error)
+  fork(parent: Context, config: any, error: any, stack: string[]) {
+    return new ForkScope(parent, this, config, error, stack)
   }
 
   dispose() {
@@ -351,22 +349,41 @@ export class MainScope<C extends Context = Context> extends EffectScope<C> {
     }
   }
 
-  private apply = (context: C, config: any) => {
-    if (typeof this.plugin !== 'function') {
-      return this.plugin.apply(context, config)
-    } else if (isConstructor(this.plugin)) {
-      // eslint-disable-next-line new-cap
-      const instance = new this.plugin(context, config)
-      const name = instance[Context.expose]
-      if (name) {
-        context.set(name, instance)
+  private apply = async (ctx: C, config: any) => {
+    const initialLine = new Error().stack!.split('\n')[2]
+    try {
+      if (typeof this.plugin !== 'function') {
+        return await this.plugin.apply(ctx, config)
+      } else if (isConstructor(this.plugin)) {
+        // eslint-disable-next-line new-cap
+        const instance = new this.plugin(ctx, config)
+        const name = instance[Context.expose]
+        if (name) {
+          ctx.set(name, instance)
+        }
+        if (instance['fork']) {
+          this.forkables.push(instance['fork'].bind(instance))
+        }
+        return instance
+      } else {
+        return await this.plugin(ctx, config)
       }
-      if (instance['fork']) {
-        this.forkables.push(instance['fork'].bind(instance))
+    } catch (reason) {
+      // 'full' | 'short' | 'none' (default: 'short')
+      const { traceInternal } = ctx.root.config
+      if (reason instanceof Error && traceInternal !== 'full') {
+        const lines = reason.stack!.split('\n')
+        const index = lines.indexOf(initialLine)
+        if (index > 0) {
+          lines.splice(index - 1, Infinity)
+          if (traceInternal !== 'none') {
+            lines.push('    at MainScope.apply (cordis:internal)')
+          }
+          lines.push(...this.stack)
+          reason.stack = lines.join('\n')
+        }
       }
-      return instance
-    } else {
-      return this.plugin(context, config)
+      throw reason
     }
   }
 
@@ -380,7 +397,7 @@ export class MainScope<C extends Context = Context> extends EffectScope<C> {
   start() {
     if (super.start()) return true
     if (!this.isReusable && this.plugin) {
-      this.ensure(async () => this.value = this.apply(this.ctx, this._config))
+      this.ensure(async () => this.apply(this.ctx, this._config))
     }
     for (const fork of this.children) {
       fork.start()
